@@ -160,44 +160,98 @@ extern "C" void cuda_pso(float *positions, float *velocities, float *pBests, flo
     cudaMemcpy(devVel, velocities, sizeof(float) * size, 
                cudaMemcpyHostToDevice);
     cudaMemcpy(devPBest, pBests, sizeof(float) * size, cudaMemcpyHostToDevice);
-    cudaMemcpy(devGBest, gBest, sizeof(float) * NUM_OF_DIMENSIONS, 
+    cudaMemcpy(devGBest, gBest, sizeof(float) * NUM_OF_DIMENSIONS,
                cudaMemcpyHostToDevice);
-    
+
+    // --- Instrumentation tache 1.3 : mesure ou part le temps ---
+    cudaEvent_t startK1, stopK1, startK2, stopK2, startM1, stopM1, startM2, stopM2;
+    cudaEventCreate(&startK1); cudaEventCreate(&stopK1);
+    cudaEventCreate(&startK2); cudaEventCreate(&stopK2);
+    cudaEventCreate(&startM1); cudaEventCreate(&stopM1);
+    cudaEventCreate(&startM2); cudaEventCreate(&stopM2);
+
+    float totalK1 = 0, totalK2 = 0, totalM1 = 0, totalM2 = 0, msTmp;
+    double totalCPU = 0;
+
+    clock_t loopStart = clock();
+
     // PSO main function
     // MAX_ITER = 30000;
 
     for (int iter = 0; iter < MAX_ITER; iter++)
-    {     
+    {
 
-        kernelUpdateParticle<<<blocksNum, threadsNum>>>(devPos, devVel, 
-                                                        devPBest, devGBest, 
-                                                        getRandomClamped(), 
-                                                        getRandomClamped());  
+        cudaEventRecord(startK1);
+        kernelUpdateParticle<<<blocksNum, threadsNum>>>(devPos, devVel,
+                                                        devPBest, devGBest,
+                                                        getRandomClamped(),
+                                                        getRandomClamped());
+        cudaEventRecord(stopK1);
+        cudaEventSynchronize(stopK1);
+        cudaEventElapsedTime(&msTmp, startK1, stopK1);
+        totalK1 += msTmp;
 
-        kernelUpdatePBest<<<blocksNum, threadsNum>>>(devPos, devPBest, 
+        cudaEventRecord(startK2);
+        kernelUpdatePBest<<<blocksNum, threadsNum>>>(devPos, devPBest,
                                                      devGBest);
-        
-        cudaMemcpy(pBests, devPBest, 
-                   sizeof(float) * NUM_OF_PARTICLES * NUM_OF_DIMENSIONS, 
+        cudaEventRecord(stopK2);
+        cudaEventSynchronize(stopK2);
+        cudaEventElapsedTime(&msTmp, startK2, stopK2);
+        totalK2 += msTmp;
+
+        cudaEventRecord(startM1);
+        cudaMemcpy(pBests, devPBest,
+                   sizeof(float) * NUM_OF_PARTICLES * NUM_OF_DIMENSIONS,
                    cudaMemcpyDeviceToHost);
-        
-        
+        cudaEventRecord(stopM1);
+        cudaEventSynchronize(stopM1);
+        cudaEventElapsedTime(&msTmp, startM1, stopM1);
+        totalM1 += msTmp;
+
+        clock_t cpuStart = clock();
         for(int i = 0; i < size; i += NUM_OF_DIMENSIONS)
         {
-            for(int k = 0; k < NUM_OF_DIMENSIONS; k++) //ssB1 
+            for(int k = 0; k < NUM_OF_DIMENSIONS; k++) //ssB1
                 temp[k] = pBests[i + k];
-        
+
             if (host_fitness_function(temp) < host_fitness_function(gBest))
             {
                 for (int k = 0; k < NUM_OF_DIMENSIONS; k++)
                     gBest[k] = temp[k];
-            }   
+            }
         }
-        
-        cudaMemcpy(devGBest, gBest, sizeof(float) * NUM_OF_DIMENSIONS, 
+        clock_t cpuEnd = clock();
+        totalCPU += (double)(cpuEnd - cpuStart) * 1000.0 / CLOCKS_PER_SEC;
+
+        cudaEventRecord(startM2);
+        cudaMemcpy(devGBest, gBest, sizeof(float) * NUM_OF_DIMENSIONS,
                    cudaMemcpyHostToDevice);
+        cudaEventRecord(stopM2);
+        cudaEventSynchronize(stopM2);
+        cudaEventElapsedTime(&msTmp, startM2, stopM2);
+        totalM2 += msTmp;
     }
-    
+
+    clock_t loopEnd = clock();
+    double totalLoopMs = (double)(loopEnd - loopStart) * 1000.0 / CLOCKS_PER_SEC;
+    double sumParts = totalK1 + totalK2 + totalM1 + totalM2 + totalCPU;
+
+    printf("\n--- Repartition du temps (tache 1.3, %d iterations) ---\n", MAX_ITER);
+    printf("%-22s %10.2f ms  (%5.2f %%)\n", "kernelUpdateParticle", totalK1, 100.0*totalK1/totalLoopMs);
+    printf("%-22s %10.2f ms  (%5.2f %%)\n", "kernelUpdatePBest",    totalK2, 100.0*totalK2/totalLoopMs);
+    printf("%-22s %10.2f ms  (%5.2f %%)\n", "cudaMemcpy pBest D2H", totalM1, 100.0*totalM1/totalLoopMs);
+    printf("%-22s %10.2f ms  (%5.2f %%)\n", "Boucle CPU gBest",     totalCPU, 100.0*totalCPU/totalLoopMs);
+    printf("%-22s %10.2f ms  (%5.2f %%)\n", "cudaMemcpy gBest H2D", totalM2, 100.0*totalM2/totalLoopMs);
+    printf("%-22s %10.2f ms\n", "Somme des parties", sumParts);
+    printf("%-22s %10.2f ms\n", "Temps total boucle", totalLoopMs);
+    printf("%-22s %9.2f %%\n\n", "Ecart somme/total", 100.0*fabs(sumParts-totalLoopMs)/totalLoopMs);
+
+    cudaEventDestroy(startK1); cudaEventDestroy(stopK1);
+    cudaEventDestroy(startK2); cudaEventDestroy(stopK2);
+    cudaEventDestroy(startM1); cudaEventDestroy(stopM1);
+    cudaEventDestroy(startM2); cudaEventDestroy(stopM2);
+    // --- fin instrumentation ---
+
     cudaMemcpy(positions, devPos, sizeof(float) * size, cudaMemcpyDeviceToHost);
     cudaMemcpy(velocities, devVel, sizeof(float) * size, 
                cudaMemcpyDeviceToHost);
